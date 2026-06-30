@@ -1,48 +1,31 @@
 const { EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 const { checkPermission } = require('../../utils/permissions');
 const { YELLOW } = require('../../utils/colors');
+const { getLogChannel } = require('../../utils/logs');
 
-const LOGS_CHANNEL_ID = '1520179324643180667';
-const SECURITY_LOGS_ID = '1520179265809940521';
-const SERVER_INVITE = 'https://discord.gg/wEccEnmCj7';
-
-// Cooldowns en ms
+const SERVER_INVITE = 'https://discord.gg/CzR6WEruEZ';
 const COOLDOWNS = { ban: 15 * 60 * 1000, mute: 5 * 60 * 1000, kick: 10 * 60 * 1000 };
 
 function getCooldownKey(userId, action) { return `${userId}_${action}`; }
 
 function checkCooldown(client, userId, action) {
   const key = getCooldownKey(userId, action);
-  const last = client.cooldowns.get(key) || 0;
-  const elapsed = Date.now() - last;
+  const elapsed = Date.now() - (client.cooldowns.get(key) || 0);
   const cd = COOLDOWNS[action] || 0;
   if (elapsed < cd) return Math.ceil((cd - elapsed) / 1000);
   return 0;
 }
 
 function setCooldown(client, userId, action) {
-  const key = getCooldownKey(userId, action);
-  client.cooldowns.set(key, Date.now());
+  client.cooldowns.set(getCooldownKey(userId, action), Date.now());
 }
 
-async function logSanction(guild, client, action, target, author, reason, extra = '') {
-  const ch = await guild.channels.fetch(LOGS_CHANNEL_ID).catch(() => null);
-  if (!ch) return;
-  const embed = new EmbedBuilder()
-    .setColor(YELLOW)
-    .setTitle(`🔨 Sanction — ${action.toUpperCase()}`)
-    .addFields(
-      { name: 'Utilisateur', value: `${target.user?.tag || target.tag} (${target.id})`, inline: true },
-      { name: 'Raison', value: reason || 'Aucune raison', inline: true },
-      { name: 'Durée', value: extra || '—', inline: true }
-    )
-    .setTimestamp();
-  await ch.send({ embeds: [embed] }).catch(() => {});
+async function logEmbed(guild, key, embed) {
+  const ch = await getLogChannel(guild, key);
+  if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
 }
 
-async function logCooldownViolation(guild, client, action, targetId, authorId) {
-  const ch = await guild.channels.fetch(SECURITY_LOGS_ID).catch(() => null);
-  if (!ch) return;
+async function logCooldownViolation(guild, action, targetId, authorId) {
   const embed = new EmbedBuilder()
     .setColor(YELLOW)
     .setTitle('⏱️ Tentative de sanction trop rapide')
@@ -52,20 +35,18 @@ async function logCooldownViolation(guild, client, action, targetId, authorId) {
       { name: 'Action', value: action, inline: true }
     )
     .setTimestamp();
-  await ch.send({ embeds: [embed] }).catch(() => {});
+  await logEmbed(guild, 'raid', embed);
 }
 
-// Récupère un membre cible depuis args[0] (mention ou ID)
 async function resolveMember(message, raw) {
   if (!raw) return null;
-  const id = raw.replace(/[<@!>]/g, '');
-  return message.guild.members.fetch(id).catch(() => null);
+  return message.guild.members.fetch(raw.replace(/[<@!>]/g, '')).catch(() => null);
 }
 
-// ─── *bl (ban) ────────────────────────────────────────────────────────────────
+// ─── *bl ─────────────────────────────────────────────────────────────────────
 const blCommand = {
   name: 'bl',
-  description: 'Bannit un membre. Tu peux préciser un nombre de jours de messages à supprimer (0-7) juste après le membre.',
+  description: 'Bannit un membre. Précise un nombre de jours de messages à supprimer (0-7) après le membre.',
   usage: '*bl <@membre> [jours] <raison>',
   category: 'Modération',
   permission: 'mod',
@@ -75,7 +56,7 @@ const blCommand = {
     if (!checkPermission(member, this.permission)) return message.reply('❌ Permission refusée.');
 
     const target = await resolveMember(message, args[0]);
-    if (!target) return message.reply('❌ Membre introuvable. Usage : `*bl <@membre> [jours] <raison>`');
+    if (!target) return message.reply('❌ Membre introuvable.');
 
     let jours = 0;
     let raisonArgs = args.slice(1);
@@ -92,7 +73,7 @@ const blCommand = {
     if (!checkPermission(member, 'admin')) {
       const remaining = checkCooldown(client, member.id, 'ban');
       if (remaining > 0) {
-        await logCooldownViolation(message.guild, client, 'ban', target.id, member.id);
+        await logCooldownViolation(message.guild, 'ban', target.id, member.id);
         return message.reply(`⏱️ Cooldown ban : encore **${remaining}s** à attendre.`);
       }
     }
@@ -102,7 +83,18 @@ const blCommand = {
       await target.ban({ reason: raison, deleteMessageSeconds: jours * 86400 });
       if (!checkPermission(member, 'admin')) setCooldown(client, member.id, 'ban');
 
-      await logSanction(message.guild, client, 'ban', target, member, raison);
+      const embed = new EmbedBuilder()
+        .setColor(YELLOW)
+        .setTitle('🔨 Ban')
+        .addFields(
+          { name: 'Membre', value: `${target.user.tag} (${target.id})`, inline: true },
+          { name: 'Modérateur', value: `${message.author.tag}`, inline: true },
+          { name: 'Raison', value: raison },
+          { name: 'Jours de messages supprimés', value: `${jours}`, inline: true }
+        )
+        .setTimestamp();
+
+      await logEmbed(message.guild, 'ban', embed);
       await message.reply(`✅ **${target.user.tag}** a été banni.`);
     } catch (err) {
       await message.reply(`❌ Impossible de bannir : ${err.message}`);
@@ -110,7 +102,7 @@ const blCommand = {
   },
 };
 
-// ─── *unbl (unban) ────────────────────────────────────────────────────────────
+// ─── *unbl ────────────────────────────────────────────────────────────────────
 const unblCommand = {
   name: 'unbl',
   description: 'Débannit un utilisateur via son ID.',
@@ -128,7 +120,18 @@ const unblCommand = {
 
     try {
       await message.guild.members.unban(userId, raison);
-      await logSanction(message.guild, client, 'unban', { id: userId, user: { tag: userId } }, member, raison);
+
+      const embed = new EmbedBuilder()
+        .setColor(YELLOW)
+        .setTitle('✅ Unban')
+        .addFields(
+          { name: 'Utilisateur', value: userId, inline: true },
+          { name: 'Modérateur', value: `${message.author.tag}`, inline: true },
+          { name: 'Raison', value: raison }
+        )
+        .setTimestamp();
+
+      await logEmbed(message.guild, 'ban', embed);
       await message.reply(`✅ Utilisateur \`${userId}\` débanni.`);
     } catch {
       await message.reply('❌ Impossible de débannir. ID invalide ou l\'utilisateur n\'est pas banni.');
@@ -160,7 +163,7 @@ const muteCommand = {
     if (!checkPermission(member, 'admin')) {
       const remaining = checkCooldown(client, member.id, 'mute');
       if (remaining > 0) {
-        await logCooldownViolation(message.guild, client, 'mute', target.id, member.id);
+        await logCooldownViolation(message.guild, 'mute', target.id, member.id);
         return message.reply(`⏱️ Cooldown mute : encore **${remaining}s** à attendre.`);
       }
     }
@@ -170,7 +173,18 @@ const muteCommand = {
       await target.timeout(duree * 60 * 1000, raison);
       if (!checkPermission(member, 'admin')) setCooldown(client, member.id, 'mute');
 
-      await logSanction(message.guild, client, 'mute', target, member, raison, `${duree} min`);
+      const embed = new EmbedBuilder()
+        .setColor(YELLOW)
+        .setTitle('🔇 Mute')
+        .addFields(
+          { name: 'Membre', value: `${target.user.tag} (${target.id})`, inline: true },
+          { name: 'Modérateur', value: `${message.author.tag}`, inline: true },
+          { name: 'Durée', value: `${duree} minute(s)`, inline: true },
+          { name: 'Raison', value: raison }
+        )
+        .setTimestamp();
+
+      await logEmbed(message.guild, 'mute', embed);
       await message.reply(`✅ **${target.user.tag}** muté pour ${duree} minute(s).`);
     } catch (err) {
       await message.reply(`❌ Impossible de muter : ${err.message}`);
@@ -196,7 +210,18 @@ const unmuteCommand = {
 
     try {
       await target.timeout(null, raison);
-      await logSanction(message.guild, client, 'unmute', target, member, raison);
+
+      const embed = new EmbedBuilder()
+        .setColor(YELLOW)
+        .setTitle('🔊 Unmute')
+        .addFields(
+          { name: 'Membre', value: `${target.user.tag} (${target.id})`, inline: true },
+          { name: 'Modérateur', value: `${message.author.tag}`, inline: true },
+          { name: 'Raison', value: raison }
+        )
+        .setTimestamp();
+
+      await logEmbed(message.guild, 'mute', embed);
       await message.reply(`✅ **${target.user.tag}** démuté.`);
     } catch (err) {
       await message.reply(`❌ Impossible de démuter : ${err.message}`);
@@ -224,7 +249,7 @@ const kickCommand = {
     if (!checkPermission(member, 'admin')) {
       const remaining = checkCooldown(client, member.id, 'kick');
       if (remaining > 0) {
-        await logCooldownViolation(message.guild, client, 'kick', target.id, member.id);
+        await logCooldownViolation(message.guild, 'kick', target.id, member.id);
         return message.reply(`⏱️ Cooldown kick : encore **${remaining}s** à attendre.`);
       }
     }
@@ -234,7 +259,17 @@ const kickCommand = {
       await target.kick(raison);
       if (!checkPermission(member, 'admin')) setCooldown(client, member.id, 'kick');
 
-      await logSanction(message.guild, client, 'kick', target, member, raison);
+      const embed = new EmbedBuilder()
+        .setColor(YELLOW)
+        .setTitle('👢 Kick')
+        .addFields(
+          { name: 'Membre', value: `${target.user.tag} (${target.id})`, inline: true },
+          { name: 'Modérateur', value: `${message.author.tag}`, inline: true },
+          { name: 'Raison', value: raison }
+        )
+        .setTimestamp();
+
+      await logEmbed(message.guild, 'mod', embed);
       await message.reply(`✅ **${target.user.tag}** expulsé.`);
     } catch (err) {
       await message.reply(`❌ Impossible d'expulser : ${err.message}`);
@@ -242,7 +277,7 @@ const kickCommand = {
   },
 };
 
-// ─── *bl-list ────────────────────────────────────────────────────────────────
+// ─── *bl-list ─────────────────────────────────────────────────────────────────
 const blListCommand = {
   name: 'bl-list',
   description: 'Affiche la liste des membres bannis.',
@@ -267,7 +302,12 @@ const blListCommand = {
       }
       if (current) chunks.push(current);
 
-      const embed = new EmbedBuilder().setColor(YELLOW).setTitle(`🚫 Liste des bannis (${bans.size})`).setDescription(chunks[0]).setTimestamp();
+      const embed = new EmbedBuilder()
+        .setColor(YELLOW)
+        .setTitle(`🚫 Liste des bannis (${bans.size})`)
+        .setDescription(chunks[0])
+        .setTimestamp();
+
       await message.channel.send({ embeds: [embed] });
     } catch (err) {
       await message.reply(`❌ Erreur : ${err.message}`);
