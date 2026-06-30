@@ -10,6 +10,7 @@ const MOD_ROLES = [
 const MUTE_ONLY_ROLES = [
   '1520179219752030218',
   '1520179219190124566',
+    '1521484438834253854',
 ];
 
 // Roles autorisés pour *clear
